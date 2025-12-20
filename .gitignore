@@ -1,0 +1,25 @@
+# macOS noise
+.DS_Store
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environments
+venv/
+.env
+.venv/
+
+# Build and tool outputs
+build/
+cmake-build*/
+compile_commands.json
+
+# Experiment artifacts (keep curated summaries under results/)
+experiments/data/raw/
+results/profiles/
+
+# Third-party drops; convert to git submodules before publishing
+third_party/stablehlo/
+third_party/archive/

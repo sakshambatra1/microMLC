@@ -100,7 +100,7 @@ def main():
     with open(filename, "w") as f:
         f.write(stablehlo_txt)
     
-    print(f"✅ Success! Written to '{filename}'")
+    print(f"Success! Written to '{filename}'")
 
 if __name__ == "__main__":
     main()

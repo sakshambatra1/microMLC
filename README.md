@@ -1,111 +1,145 @@
 # toy-transformer Compiler Playground
 
-Transformer-style workloads really stress MLIR on CPUs. This repo is me figuring out multi-level tiling, epilogue fusion, vectorization, and scheduling on top of StableHLO/MLIR, while keeping upstream code separate from the experiments I care about.
-
-## What you’ll find
-- JAX → StableHLO → (manually/AI massaged) Linalg pipeline so I can reason about codegen before writing real passes.
-- Benchmarks with matching baseline/tiled IR and a timing harness.
-- Toolchain pinned to StableHLO v0.13.0 + LLVM/MLIR llvmorg-18.1.8, so numbers don’t drift.
-- Clear split between my work and whatever third-party bits I pull locally.
+A playground for exploring MLIR/StableHLO compiler passes on transformer workloads, with focus on tiling, fusion, bufferization, and vectorization optimizations.
 
 ## Repository Layout
 
 ```
 toy-transformer/
-├── compiler/            # Original dialects, passes, python prototypes, and tests
-│   ├── python/          # Transformer model, IR generation, RoPE experiments
-│   └── tests/           # (future) mlir-opt + python regression suites
-├── docs/                # Design notes, architecture diagrams, performance write-ups
-├── experiments/         # Benchmarks, datasets, standalone MLIR reproducers
-├── results/             # Curated metrics, charts, notebooks (raw profiles ignored)
-├── scripts/             # Build/run automation
-├── third_party/         # (local only) StableHLO/LLVM/MLIR checkouts, ignored in git
-├── patches/             # Patch queue for any third-party tweaks
-└── venv/                # Local virtual environment (gitignored)
+├── passes/                 # Custom MLIR pass implementations
+├── ir/                     # Input and staged output IRs
+├── tools/                  # Build, sync, and benchmarking scripts
+├── transformer/python/     # Transformer modeling code and IR generators
+├── docs/                   # Design notes and performance analysis
+├── experiments/            # Test cases and MLIR reproducers
+├── results/                # Benchmark outputs and summaries
+├── scripts/                # Build and execution helpers
+└── third_party/            # StableHLO/LLVM checkouts (gitignored)
 ```
 
-Only `compiler/`, `experiments/`, `docs/`, `results/`, `scripts/`, and `patches/` are checked in. The `third_party/` folder is local-only and stays out of GitHub; when I publish I’ll swap it for a submodule reference.
-
-## Toolchain Versions & Known Limitations
+## Toolchain Versions
 
 | Component | Version | Commit |
 |-----------|---------|--------|
 | StableHLO | v0.13.0 | `75c7095a97c6aaaee15dfab1fac529ce695e1d4a` |
-| LLVM/MLIR | llvmorg-18.1.8 | `3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff` |
+| LLVM/MLIR (build) | llvmorg-18.1.8 | `3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff` |
+| LLVM (runtime) | 17.0.6 | Homebrew `llvm@17` |
 
-The local StableHLO checkout I build against embeds a matching `llvm-project`. I stick to that toolchain (`cmake -GNinja -DLLVM_ENABLE_PROJECTS=mlir -DLLVM_TARGETS_TO_BUILD=X86 ..`) so the dialects don’t drift under me.
+## Setup
 
-> **StableHLO → Linalg reality check:** v0.13.0 doesn’t have a reliable `stablehlo-legalize-to-linalg` pipeline. Today I massage the StableHLO IR into Linalg (sometimes with AI assistance) before trying tiling/vectorization passes. Long term I’ll upgrade or script the missing pieces.
-
-## Pass & IR Walkthrough
-
-1. **JAX → StableHLO exporter (`compiler/python/compilerpass_selfatt.py`)**  
-   Deterministic multi-head attention workload. Emits:
-   - JAXPR for the high-level graph,
-   - StableHLO text IR (`attn.mlir`) for downstream experiments,
-   - Optional canonical HLO text for comparison.
-2. **Attention building blocks (`compiler/python/selfattention.py`, `layers.py`, `embeddings.py`, `tokenizer.py`)**  
-   JAX reference implementation of the transformer components that MLIR passes must preserve.
-3. **Tiling prototype (`experiments/benchmarks/tiling/tiling_benchmark.py`)**  
-   Python version of my planned MLIR tiling pass (tile matmul along L2/L1). Produces paired IR snapshots (`attn_before.mlir`, `attn_tiled.mlir`) and measures correctness + speedup.
-4. **IR gallery (`experiments/ir/*.mlir`)**  
-   Standalone MLIR modules to repro interesting lowering issues or highlight fusion opportunities.
-
-As C++ MLIR passes land, they will live under `compiler/include/toy/` and `compiler/lib/passes/` with matching lit tests in `compiler/tests/mlir/`.
-
-## Quickstart (Python + JAX pipeline)
+### 1. Clone StableHLO and LLVM
 
 ```bash
-git clone <repo> toy-transformer
-cd toy-transformer
-python3 -m venv venv
-source venv/bin/activate
-pip install --upgrade pip
-pip install jax jaxlib numpy
+mkdir -p third_party
+git clone https://github.com/openxla/stablehlo.git third_party/stablehlo
+git -C third_party/stablehlo checkout 75c7095a97c6aaaee15dfab1fac529ce695e1d4a
+
+git clone https://github.com/llvm/llvm-project.git third_party/stablehlo/llvm-project
+git -C third_party/stablehlo/llvm-project checkout 3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff
 ```
 
-Generate StableHLO IR:
+### 2. Sync Custom Passes
 
 ```bash
-python -m compiler.python.compilerpass_selfatt
-# Outputs JAXPR + StableHLO text and writes attn.mlir at repo root.
-mv attn.mlir experiments/ir/attn_latest.mlir  # optional snapshot
+bash tools/sync_passes.sh
 ```
 
-Run the tiling benchmark:
+Copies pass implementations from [passes/](passes/) into `third_party/stablehlo/stablehlo/transforms/`.
+
+### 3. Build LLVM/MLIR
 
 ```bash
-python experiments/benchmarks/tiling/tiling_benchmark.py
-# Prints correctness diff + average CPU runtimes for baseline vs tiled kernels.
+cmake -S third_party/stablehlo/llvm-project/llvm \
+  -B third_party/stablehlo/llvm-project/build \
+  -G Ninja \
+  -DLLVM_ENABLE_PROJECTS=mlir \
+  -DLLVM_TARGETS_TO_BUILD=host \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build third_party/stablehlo/llvm-project/build
 ```
 
-## Running StableHLO / MLIR Passes
-
-After building StableHLO (inside `third_party/stablehlo`, run `cmake -B build -G Ninja && cmake --build build -t stablehlo-opt`), you can pipe any IR from `experiments/ir/` or `experiments/benchmarks/` through your pass pipeline.
-
-Example tiling invocation:
+### 4. Build stablehlo-opt
 
 ```bash
-export OPT_BIN=third_party/stablehlo/build/bin/stablehlo-opt
-export INPUT=experiments/benchmarks/tiling/attn_before.mlir
-export OUTPUT=experiments/benchmarks/tiling/attn_tiled_from_opt.mlir
-
-"$OPT_BIN" "$INPUT" \
-  --stablehlo-linalg-tiling="l2-tile-sizes=0,32,32 l1-tile-sizes=0,0,8" \
-  -o "$OUTPUT"
+cmake -S third_party/stablehlo \
+  -B third_party/stablehlo/build \
+  -G Ninja \
+  -DMLIR_DIR=third_party/stablehlo/llvm-project/build/lib/cmake/mlir \
+  -DLLVM_DIR=third_party/stablehlo/llvm-project/build/lib/cmake/llvm \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build third_party/stablehlo/build -t stablehlo-opt
 ```
 
-Tips:
-- Swap `INPUT` for any new StableHLO/Linalg module you produce.
-- Adjust tile sizes or pass options (`vectorize`, `enable-epilogue-fusion`, etc.) while iterating.
-- Use `--pass-pipeline=` when chaining multiple transformations.
-- Commit resulting IRs/metrics into `experiments/benchmarks/<workload>/` and `results/summaries/`.
+### 5. Install Runtime LLVM
 
-## Development Workflow
+```bash
+brew install llvm@17
+```
 
-1. Implement/tweak passes under `compiler/` (Python prototypes today, MLIR C++ soon).
-2. Save reproducible IR repros or inputs under `experiments/`.
-3. Benchmark and archive results under `results/` with commentary in `docs/performance/`.
-4. Track manual StableHLO changes as patches in `patches/` and keep `third_party/` pristine (convert to submodules before publishing).
+## Custom Passes
 
-It mirrors how upstream MLIR is laid out without pulling third-party code into GitHub, and keeps the focus on the passes/benchmarks/results I actually care about.
+All pass implementations live in [passes/](passes/):
+
+| Pass | Description |
+|------|-------------|
+| [TilingPass.cpp](passes/TilingPass.cpp) | Converts StableHLO to Linalg and applies initial tiling |
+| [GenericFusionPass.cpp](passes/GenericFusionPass.cpp) | Fuses adjacent Linalg generic operations |
+| [LinalgTilingPass.cpp](passes/LinalgTilingPass.cpp) | Multi-level cache-aware tiling (L2/L1) |
+| [OneShotBufferizePass.cpp](passes/OneShotBufferizePass.cpp) | Tensor-to-memref bufferization |
+| [ToyVectorizationPass.cpp](passes/ToyVectorizationPass.cpp) | SIMD vectorization with configurable vector width |
+| [ParallelSchedulingPassAttn.cpp](passes/ParallelSchedulingPassAttn.cpp) | Parallel scheduling for attention operations |
+
+**Registration files:** [Passes.td](passes/Passes.td), [Passes.h](passes/Passes.h), [CMakeLists.txt](passes/CMakeLists.txt)
+
+After modifying a pass, resync and rebuild:
+
+```bash
+bash tools/sync_passes.sh
+cmake --build third_party/stablehlo/build -t stablehlo-opt
+```
+
+## Pipeline Execution
+
+Run the full optimization pipeline:
+
+```bash
+bash tools/run_attn_cache_pipeline.sh
+```
+
+**Pipeline stages** (input/output in [ir/](ir/)):
+
+| Stage | Pass | Output |
+|-------|------|--------|
+| 0 | `-stablehlo-tiling` | [attn_stage0_linalg.mlir](ir/attn_stage0_linalg.mlir) |
+| 1 | `-generic-fusion` | [attn_stage1_fused.mlir](ir/attn_stage1_fused.mlir) |
+| 2 | `-stablehlo-linalg-tiling=l2-tile-sizes=64,64,64 l1-tile-sizes=4,4,4` | [attn_stage2_tiled_tensor.mlir](ir/attn_stage2_tiled_tensor.mlir) |
+| 3 | `-empty-tensor-to-alloc-tensor`, `-one-shot-bufferize`, `-convert-bufferization-to-memref` | [attn_stage3_bufferized.mlir](ir/attn_stage3_bufferized.mlir) |
+| 5 | `-toy-vectorize=vector-width=4 enable-reductions` | [attn_stage5_vectorized.mlir](ir/attn_stage5_vectorized.mlir) |
+
+## Manual Pass Execution
+
+Run `stablehlo-opt` directly with custom pass pipeline:
+
+```bash
+third_party/stablehlo/build/bin/stablehlo-opt \
+  ir/attn_complete.mlir \
+  -stablehlo-tiling \
+  -generic-fusion \
+  "-stablehlo-linalg-tiling=l2-tile-sizes=64,64,64 l1-tile-sizes=4,4,4 enable-promotion=false" \
+  -canonicalize -cse \
+  -o /tmp/attn_out.mlir
+```
+
+## Benchmarking
+
+**All stages:**
+```bash
+ITERS=100 bash tools/benchmark_all_stages.sh
+```
+
+**Single stage (vectorized):**
+```bash
+bash tools/benchmark_stage5.sh
+```
+
+Both use `mlir-cpu-runner` to execute baseline ([attn_complete.mlir](ir/attn_complete.mlir)) vs optimized ([attention_pipeline.mlir](ir/attention_pipeline.mlir)) IR.

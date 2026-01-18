@@ -1,4 +1,4 @@
-# toy-transformer Compiler Playground
+# microMLC (micro Machine Learning Compiler) Playground
 
 A playground for exploring MLIR/StableHLO compiler passes on transformer workloads, with focus on tiling, fusion, bufferization, and vectorization optimizations.
 
